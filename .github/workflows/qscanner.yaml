@@ -210,16 +210,24 @@ jobs:
           cp "${sarif_path}" qscanner-report.sarif
           echo "SARIF report staged at qscanner-report.sarif (source: ${sarif_path})"
 
-      # Persist the SARIF report for later review / audit.
-      # Note: only the .sarif output is uploaded — the upload path is
-      # deliberately narrow so no unexpected files (env dumps, tmp data)
-      # can accidentally be published as build artifacts.
-      - name: Upload QScanner SARIF as workflow artifact
+      # Persist scan outputs for later review / audit.
+      #
+      # Uploaded contents:
+      #   - qscanner-report.sarif   canonical SARIF staged by the scan step
+      #   - qscanner-output/**      every file qscanner wrote to its
+      #                             --output-dir, which includes the raw
+      #                             *-Report.sarif.json, SBOM/SPDX output,
+      #                             ScanResult.json, and any files produced
+      #                             by the aiagent / compliance / pkg
+      #                             scan-types.
+      - name: Upload QScanner outputs as workflow artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qscanner-report-${{ github.sha }}
-          path: qscanner-report.sarif
+          path: |
+            qscanner-report.sarif
+            qscanner-output/**
           if-no-files-found: warn
           retention-days: 30
 
