@@ -88,7 +88,6 @@ jobs:
           sanitized_host=$(printf '%s' "${QSCANNER_DOWNLOAD_URL}" | awk -F/ '{print $1"//"$3}')
           echo "Downloading QScanner archive from host: ${sanitized_host}"
 
-          mkdir -p qscanner-bin
           archive="qscanner-archive"
 
           # Pull the archive with retries for transient network errors
@@ -96,39 +95,62 @@ jobs:
                -o "${archive}" \
                "${QSCANNER_DOWNLOAD_URL}"
 
-          # Detect archive type by file signature and extract accordingly
+          # Detect archive type by file signature and extract accordingly.
+          # IMPORTANT: extract directly into the current workspace (no
+          # qscanner-bin subfolder) because the tarball ships multiple
+          # sibling binaries that qscanner expects to find next to itself.
           file_type=$(file -b --mime-type "${archive}" || echo "unknown")
           echo "Detected archive type: ${file_type}"
           case "${file_type}" in
             application/gzip|application/x-gzip|application/x-tar)
-              tar -xzvf "${archive}" -C qscanner-bin
+              tar -xzvf "${archive}"
               ;;
             application/zip)
-              unzip -o "${archive}" -d qscanner-bin
+              unzip -o "${archive}"
               ;;
             *)
               # Fallback: try tar.gz first, then zip, then treat as raw binary
-              if tar -xzvf "${archive}" -C qscanner-bin 2>/dev/null; then
+              if tar -xzvf "${archive}" 2>/dev/null; then
                 :
-              elif unzip -o "${archive}" -d qscanner-bin 2>/dev/null; then
+              elif unzip -o "${archive}" 2>/dev/null; then
                 :
               else
                 echo "Archive format not recognized; treating download as raw binary."
-                mv "${archive}" qscanner-bin/qscanner
+                mv "${archive}" qscanner
               fi
               ;;
           esac
+          rm -f "${archive}"
 
-          # Locate the extracted qscanner binary
-          QSCANNER_BIN=$(find qscanner-bin -type f -name 'qscanner' | head -n1)
+          # Locate the extracted qscanner binary anywhere in the workspace
+          # (it may land at the top level or inside a top-level directory
+          # created by the tarball, e.g. ./qscanner-4.8.0-3/qscanner).
+          QSCANNER_BIN=$(find . -maxdepth 4 -type f -name 'qscanner' \
+                          -not -path './.git/*' | head -n1)
           if [ -z "${QSCANNER_BIN}" ]; then
-            echo "::error::qscanner binary not found inside the downloaded archive"
-            ls -R qscanner-bin
+            echo "::error::qscanner binary not found after extraction"
+            find . -maxdepth 3 -type f -not -path './.git/*' | head -50
             exit 1
           fi
 
-          chmod +x "${QSCANNER_BIN}"
+          # Resolve the directory that contains qscanner and the sibling
+          # binary it needs. All files in that directory are made
+          # executable, and the directory is added to PATH so qscanner can
+          # locate its sibling by name.
+          QSCANNER_DIR=$(cd "$(dirname "${QSCANNER_BIN}")" && pwd)
+          QSCANNER_BIN="${QSCANNER_DIR}/$(basename "${QSCANNER_BIN}")"
+          echo "qscanner binary: ${QSCANNER_BIN}"
+          echo "qscanner directory (added to PATH): ${QSCANNER_DIR}"
+
+          find "${QSCANNER_DIR}" -maxdepth 1 -type f -exec chmod +x {} +
+          ls -la "${QSCANNER_DIR}"
+
+          # Export both the full binary path and its directory so later
+          # steps can reference either, and prepend the directory to PATH.
           echo "QSCANNER_BIN=${QSCANNER_BIN}" >> "${GITHUB_ENV}"
+          echo "QSCANNER_DIR=${QSCANNER_DIR}" >> "${GITHUB_ENV}"
+          echo "${QSCANNER_DIR}" >> "${GITHUB_PATH}"
+
           "${QSCANNER_BIN}" --help | head -n 20 || true
 
       # Scan the locally built image and emit a SARIF report.
