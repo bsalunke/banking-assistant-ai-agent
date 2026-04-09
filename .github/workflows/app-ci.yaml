@@ -1,13 +1,9 @@
 name: Container Apps CI/CD pipeline
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "app/**"
-    tags:        
-      - v*.*.*
+  # Auto-trigger on push disabled so only the Qualys QScanner workflow
+  # runs on commits. Use the "Run workflow" button in the Actions tab
+  # (or re-add the push block below) if you need to run this pipeline.
   workflow_dispatch:
 
 # Set up permissions for deploying with secretless Azure federated credentials

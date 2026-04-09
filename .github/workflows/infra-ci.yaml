@@ -1,12 +1,9 @@
 name: Infra CI Pipeline 
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "deploy/**"
-
+  # Auto-trigger on push disabled so only the Qualys QScanner workflow
+  # runs on commits. Use the "Run workflow" button in the Actions tab
+  # (or re-add the push block below) if you need to run this pipeline.
   workflow_dispatch:
 
 # To configure required secrets for connecting to Azure, simply run `azd pipeline config`

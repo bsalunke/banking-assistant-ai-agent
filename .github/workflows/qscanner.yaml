@@ -1,0 +1,151 @@
+name: Qualys QScanner - Container Image Vulnerability Scan
+
+# Runs on every commit (push) and on pull requests so vulnerabilities
+# are caught before code is merged.
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - aiagent-scan
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      qscanner_download_url:
+        description: "Full URL to the QScanner archive (tar.gz or zip). Overrides the repo variable QSCANNER_DOWNLOAD_URL."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  # Required so the codeql-action can upload the SARIF report
+  # to the GitHub Security > Code scanning alerts tab.
+  security-events: write
+
+jobs:
+  qscanner-image-scan:
+    name: Build & scan backend image with Qualys QScanner
+    runs-on: ubuntu-latest
+
+    env:
+      # Configure these separately in the repository:
+      #   - secrets.QUALYS_ACCESS_TOKEN    (required, sensitive)
+      #   - vars.QUALYS_POD                (e.g. US1, US2, US3, EU1, IN1)
+      #   - vars.QSCANNER_DOWNLOAD_URL     (archive URL; can be overridden per-run
+      #                                     via the workflow_dispatch input)
+      QUALYS_ACCESS_TOKEN: ${{ secrets.QUALYS_ACCESS_TOKEN }}
+      QUALYS_POD: ${{ vars.QUALYS_POD || 'US3' }}
+      QSCANNER_DOWNLOAD_URL: ${{ github.event.inputs.qscanner_download_url || vars.QSCANNER_DOWNLOAD_URL }}
+      IMAGE_NAME: banking-assistant-backend
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the container image locally so QScanner can analyse it.
+      # The image is loaded into the local Docker daemon (not pushed).
+      - name: Build backend container image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app/backend
+          file: ./app/backend/Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+      # Download the QScanner archive from the URL provided as a workflow
+      # input or repo variable, then extract the binary.
+      #
+      # Pattern based on the Qualys GitHub integration docs:
+      #   https://docs.qualys.com/en/qscanner/latest/qscanner_usage/integration_with_github.htm
+      #   https://docs.qualys.com/en/qscanner/latest/assets/images/images/sarif_upload_github.png
+      - name: Download & extract Qualys QScanner
+        run: |
+          set -euo pipefail
+
+          if [ -z "${QSCANNER_DOWNLOAD_URL:-}" ]; then
+            echo "::error::QSCANNER_DOWNLOAD_URL is empty. Set repo variable QSCANNER_DOWNLOAD_URL or pass the workflow_dispatch input 'qscanner_download_url'."
+            exit 1
+          fi
+
+          echo "Downloading QScanner archive from: ${QSCANNER_DOWNLOAD_URL}"
+          mkdir -p qscanner-bin
+          archive="qscanner-archive"
+
+          # Pull the archive with retries for transient network errors
+          curl -fSL --retry 3 --retry-delay 5 \
+               -o "${archive}" \
+               "${QSCANNER_DOWNLOAD_URL}"
+
+          # Detect archive type by file signature and extract accordingly
+          file_type=$(file -b --mime-type "${archive}" || echo "unknown")
+          echo "Detected archive type: ${file_type}"
+          case "${file_type}" in
+            application/gzip|application/x-gzip|application/x-tar)
+              tar -xzvf "${archive}" -C qscanner-bin
+              ;;
+            application/zip)
+              unzip -o "${archive}" -d qscanner-bin
+              ;;
+            *)
+              # Fallback: try tar.gz first, then zip, then treat as raw binary
+              if tar -xzvf "${archive}" -C qscanner-bin 2>/dev/null; then
+                :
+              elif unzip -o "${archive}" -d qscanner-bin 2>/dev/null; then
+                :
+              else
+                echo "Archive format not recognized; treating download as raw binary."
+                mv "${archive}" qscanner-bin/qscanner
+              fi
+              ;;
+          esac
+
+          # Locate the extracted qscanner binary
+          QSCANNER_BIN=$(find qscanner-bin -type f -name 'qscanner' | head -n1)
+          if [ -z "${QSCANNER_BIN}" ]; then
+            echo "::error::qscanner binary not found inside the downloaded archive"
+            ls -R qscanner-bin
+            exit 1
+          fi
+
+          chmod +x "${QSCANNER_BIN}"
+          echo "QSCANNER_BIN=${QSCANNER_BIN}" >> "${GITHUB_ENV}"
+          "${QSCANNER_BIN}" --help | head -n 20 || true
+
+      # Scan the locally built image and emit a SARIF report.
+      # Based on the Qualys sample:
+      #   ./qscanner --pod US3 --access-token $QUALYS_ACCESS_TOKEN \
+      #              --report-format table,sarif image <image>
+      - name: Run QScanner vulnerability scan
+        run: |
+          set -euo pipefail
+          "${QSCANNER_BIN}" \
+            --pod "${QUALYS_POD}" \
+            --access-token "${QUALYS_ACCESS_TOKEN}" \
+            --report-format table,sarif \
+            --report-file-path qscanner-report \
+            image "${IMAGE_NAME}:${IMAGE_TAG}"
+
+      # Persist scan artifacts for later review / audit.
+      - name: Upload QScanner report as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qscanner-report-${{ github.sha }}
+          path: |
+            qscanner-report*
+          retention-days: 30
+
+      # Publish SARIF results to GitHub's Security tab.
+      - name: Upload SARIF to GitHub code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: qscanner-report.sarif
+          category: qualys-qscanner
