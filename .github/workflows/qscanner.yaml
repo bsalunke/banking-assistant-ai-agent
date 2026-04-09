@@ -173,11 +173,24 @@ jobs:
             --report-format table,sarif \
             image "${IMAGE_NAME}:${IMAGE_TAG}"
 
-          # Find the generated SARIF file inside the output dir and copy it
-          # to the well-known path qscanner-report.sarif for the upload steps.
-          sarif_path=$(find qscanner-output -type f -name '*.sarif' | head -n1)
+          # Find the generated SARIF file and copy it to the canonical path
+          # qscanner-report.sarif used by the upload steps.
+          #
+          # qscanner writes the SARIF report as "<digest>-Report.sarif.json"
+          # (a .sarif.json double extension), so we match both *.sarif and
+          # *.sarif.json to be robust across qscanner versions. We prefer the
+          # file whose name contains "Report" if there are multiple hits.
+          sarif_path=$(find qscanner-output -type f \
+                        \( -name '*.sarif' -o -name '*.sarif.json' \) \
+                        | grep -i 'report' | head -n1 || true)
           if [ -z "${sarif_path}" ]; then
-            echo "::error::qscanner did not produce a .sarif file in qscanner-output/"
+            # Fallback: first SARIF-looking file regardless of naming
+            sarif_path=$(find qscanner-output -type f \
+                          \( -name '*.sarif' -o -name '*.sarif.json' \) \
+                          | head -n1 || true)
+          fi
+          if [ -z "${sarif_path}" ]; then
+            echo "::error::qscanner did not produce a .sarif or .sarif.json file in qscanner-output/"
             ls -R qscanner-output || true
             exit 1
           fi
