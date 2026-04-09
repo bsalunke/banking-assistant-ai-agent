@@ -160,12 +160,29 @@ jobs:
             exit 1
           fi
 
+          # qscanner writes its report files into the directory given by
+          # --output-dir (there is no --report-file-path flag). We run the
+          # scan, then locate the generated SARIF file and copy it to a
+          # canonical path that the upload steps reference.
+          mkdir -p qscanner-output
+
           "${QSCANNER_BIN}" \
             --gateway-url "${QUALYS_GATEWAY_URL}" \
             --access-token "${QUALYS_ACCESS_TOKEN}" \
+            --output-dir qscanner-output \
             --report-format table,sarif \
-            --report-file-path qscanner-report \
             image "${IMAGE_NAME}:${IMAGE_TAG}"
+
+          # Find the generated SARIF file inside the output dir and copy it
+          # to the well-known path qscanner-report.sarif for the upload steps.
+          sarif_path=$(find qscanner-output -type f -name '*.sarif' | head -n1)
+          if [ -z "${sarif_path}" ]; then
+            echo "::error::qscanner did not produce a .sarif file in qscanner-output/"
+            ls -R qscanner-output || true
+            exit 1
+          fi
+          cp "${sarif_path}" qscanner-report.sarif
+          echo "SARIF report staged at qscanner-report.sarif (source: ${sarif_path})"
 
       # Persist the SARIF report for later review / audit.
       # Note: only the .sarif output is uploaded — the upload path is
