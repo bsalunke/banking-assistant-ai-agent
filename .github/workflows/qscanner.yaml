@@ -35,10 +35,14 @@ jobs:
       #                                     job level — scoped only to the scan
       #                                     step below so earlier/later steps
       #                                     cannot read it from their env)
-      #   - vars.QUALYS_POD                (e.g. US1, US2, US3, EU1, IN1)
+      #   - vars.QUALYS_GATEWAY_URL        (required; full Qualys CMS CLI gateway
+      #                                     URL, e.g.
+      #                                     https://gateway.qg4.apps.qualys.com/cms/cli/v1.0
+      #                                     — used with `qscanner --gateway-url`
+      #                                     for non-standard / custom pods)
       #   - vars.QSCANNER_DOWNLOAD_URL     (archive URL; can be overridden per-run
       #                                     via the workflow_dispatch input)
-      QUALYS_POD: ${{ vars.QUALYS_POD || 'US3' }}
+      QUALYS_GATEWAY_URL: ${{ vars.QUALYS_GATEWAY_URL }}
       QSCANNER_DOWNLOAD_URL: ${{ github.event.inputs.qscanner_download_url || vars.QSCANNER_DOWNLOAD_URL }}
       IMAGE_NAME: banking-assistant-backend
       IMAGE_TAG: ${{ github.sha }}
@@ -128,9 +132,9 @@ jobs:
           "${QSCANNER_BIN}" --help | head -n 20 || true
 
       # Scan the locally built image and emit a SARIF report.
-      # Based on the Qualys sample:
-      #   ./qscanner --pod US3 --access-token $QUALYS_ACCESS_TOKEN \
-      #              --report-format table,sarif image <image>
+      # Uses --gateway-url instead of --pod so non-standard / custom Qualys
+      # platforms (e.g. qg4) can be targeted. Docs:
+      #   https://docs.qualys.com/en/qscanner/latest/qscanner_usage/qscanner_commands.htm
       #
       # The Qualys access token is scoped to THIS step only — it is not in the
       # job-level env, so no other step (checkout, build, download, upload) has
@@ -151,9 +155,13 @@ jobs:
             echo "::error::QUALYS_ACCESS_TOKEN secret is not set in the repository."
             exit 1
           fi
+          if [ -z "${QUALYS_GATEWAY_URL:-}" ]; then
+            echo "::error::QUALYS_GATEWAY_URL repo variable is not set."
+            exit 1
+          fi
 
           "${QSCANNER_BIN}" \
-            --pod "${QUALYS_POD}" \
+            --gateway-url "${QUALYS_GATEWAY_URL}" \
             --access-token "${QUALYS_ACCESS_TOKEN}" \
             --report-format table,sarif \
             --report-file-path qscanner-report \
