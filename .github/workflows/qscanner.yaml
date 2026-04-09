@@ -1,4 +1,4 @@
-name: Qualys QScanner - Container Image Vulnerability Scan
+name: Qualys QScanner - Source Code Vulnerability Scan
 
 # Runs on every commit (push) and on pull requests so vulnerabilities
 # are caught before code is merged.
@@ -25,8 +25,8 @@ permissions:
   security-events: write
 
 jobs:
-  qscanner-image-scan:
-    name: Build & scan backend image with Qualys QScanner
+  qscanner-code-scan:
+    name: Scan repo source with Qualys QScanner
     runs-on: ubuntu-latest
 
     env:
@@ -42,28 +42,15 @@ jobs:
       #                                     for non-standard / custom pods)
       #   - vars.QSCANNER_DOWNLOAD_URL     (archive URL; can be overridden per-run
       #                                     via the workflow_dispatch input)
+      #   - vars.QSCANNER_CODE_PATH        (optional; path inside the checkout
+      #                                     to scan; defaults to "." = whole repo)
       QUALYS_GATEWAY_URL: ${{ vars.QUALYS_GATEWAY_URL }}
       QSCANNER_DOWNLOAD_URL: ${{ github.event.inputs.qscanner_download_url || vars.QSCANNER_DOWNLOAD_URL }}
-      IMAGE_NAME: banking-assistant-backend
-      IMAGE_TAG: ${{ github.sha }}
+      QSCANNER_CODE_PATH: ${{ vars.QSCANNER_CODE_PATH || '.' }}
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      # Build the container image locally so QScanner can analyse it.
-      # The image is loaded into the local Docker daemon (not pushed).
-      - name: Build backend container image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./app/backend
-          file: ./app/backend/Dockerfile
-          push: false
-          load: true
-          tags: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
 
       # Download the QScanner archive from the URL provided as a workflow
       # input or repo variable, then extract the binary.
@@ -153,15 +140,17 @@ jobs:
 
           "${QSCANNER_BIN}" --help | head -n 20 || true
 
-      # Scan the locally built image and emit a SARIF report.
-      # Uses --gateway-url instead of --pod so non-standard / custom Qualys
-      # platforms (e.g. qg4) can be targeted. Docs:
+      # Scan the checked-out source tree and emit a SARIF report.
+      # Uses the `code` subcommand (not `image`) to scan the repo in place
+      # rather than a built container image. Uses --gateway-url instead of
+      # --pod so non-standard / custom Qualys platforms (e.g. qg4) can be
+      # targeted. Docs:
       #   https://docs.qualys.com/en/qscanner/latest/qscanner_usage/qscanner_commands.htm
       #
       # The Qualys access token is scoped to THIS step only — it is not in the
-      # job-level env, so no other step (checkout, build, download, upload) has
-      # it available. Shell tracing is intentionally not enabled.
-      - name: Run QScanner vulnerability scan
+      # job-level env, so no other step (checkout, download, upload) has it
+      # available. Shell tracing is intentionally not enabled.
+      - name: Run QScanner code scan
         env:
           QUALYS_ACCESS_TOKEN: ${{ secrets.QUALYS_ACCESS_TOKEN }}
         run: |
@@ -188,12 +177,14 @@ jobs:
           # canonical path that the upload steps reference.
           mkdir -p qscanner-output
 
+          echo "Scanning code path: ${QSCANNER_CODE_PATH}"
           "${QSCANNER_BIN}" \
             --gateway-url "${QUALYS_GATEWAY_URL}" \
             --access-token "${QUALYS_ACCESS_TOKEN}" \
             --output-dir qscanner-output \
-            --report-format table,sarif \
-            image "${IMAGE_NAME}:${IMAGE_TAG}"
+            --report-format sarif \
+            --scan-types pkg,compliance,aiagent \
+            code "${QSCANNER_CODE_PATH}"
 
           # Find the generated SARIF file and copy it to the canonical path
           # qscanner-report.sarif used by the upload steps.
