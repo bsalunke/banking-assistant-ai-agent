@@ -31,11 +31,13 @@ jobs:
 
     env:
       # Configure these separately in the repository:
-      #   - secrets.QUALYS_ACCESS_TOKEN    (required, sensitive)
+      #   - secrets.QUALYS_ACCESS_TOKEN    (required, sensitive; NOT exposed at
+      #                                     job level — scoped only to the scan
+      #                                     step below so earlier/later steps
+      #                                     cannot read it from their env)
       #   - vars.QUALYS_POD                (e.g. US1, US2, US3, EU1, IN1)
       #   - vars.QSCANNER_DOWNLOAD_URL     (archive URL; can be overridden per-run
       #                                     via the workflow_dispatch input)
-      QUALYS_ACCESS_TOKEN: ${{ secrets.QUALYS_ACCESS_TOKEN }}
       QUALYS_POD: ${{ vars.QUALYS_POD || 'US3' }}
       QSCANNER_DOWNLOAD_URL: ${{ github.event.inputs.qscanner_download_url || vars.QSCANNER_DOWNLOAD_URL }}
       IMAGE_NAME: banking-assistant-backend
@@ -66,6 +68,9 @@ jobs:
       #   https://docs.qualys.com/en/qscanner/latest/qscanner_usage/integration_with_github.htm
       #   https://docs.qualys.com/en/qscanner/latest/assets/images/images/sarif_upload_github.png
       - name: Download & extract Qualys QScanner
+        # NOTE: shell trace (`set -x`) is intentionally NOT enabled — it would
+        # cause command expansions (including env var values) to be echoed to
+        # the log. Keep `set -euo pipefail` only.
         run: |
           set -euo pipefail
 
@@ -74,7 +79,11 @@ jobs:
             exit 1
           fi
 
-          echo "Downloading QScanner archive from: ${QSCANNER_DOWNLOAD_URL}"
+          # Echo only the scheme+host so any signed query string in the URL
+          # (e.g. presigned S3 URL) does NOT appear in the build log.
+          sanitized_host=$(printf '%s' "${QSCANNER_DOWNLOAD_URL}" | awk -F/ '{print $1"//"$3}')
+          echo "Downloading QScanner archive from host: ${sanitized_host}"
+
           mkdir -p qscanner-bin
           archive="qscanner-archive"
 
@@ -122,9 +131,27 @@ jobs:
       # Based on the Qualys sample:
       #   ./qscanner --pod US3 --access-token $QUALYS_ACCESS_TOKEN \
       #              --report-format table,sarif image <image>
+      #
+      # The Qualys access token is scoped to THIS step only — it is not in the
+      # job-level env, so no other step (checkout, build, download, upload) has
+      # it available. Shell tracing is intentionally not enabled.
       - name: Run QScanner vulnerability scan
+        env:
+          QUALYS_ACCESS_TOKEN: ${{ secrets.QUALYS_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
+
+          # Belt-and-suspenders: explicitly tell the runner to mask the token
+          # in all log output for this step. GitHub already auto-masks values
+          # that come from the `secrets` context, but this guarantees masking
+          # applies even if the token is transformed or re-emitted by qscanner.
+          echo "::add-mask::${QUALYS_ACCESS_TOKEN}"
+
+          if [ -z "${QUALYS_ACCESS_TOKEN:-}" ]; then
+            echo "::error::QUALYS_ACCESS_TOKEN secret is not set in the repository."
+            exit 1
+          fi
+
           "${QSCANNER_BIN}" \
             --pod "${QUALYS_POD}" \
             --access-token "${QUALYS_ACCESS_TOKEN}" \
@@ -132,14 +159,17 @@ jobs:
             --report-file-path qscanner-report \
             image "${IMAGE_NAME}:${IMAGE_TAG}"
 
-      # Persist scan artifacts for later review / audit.
-      - name: Upload QScanner report as workflow artifact
+      # Persist the SARIF report for later review / audit.
+      # Note: only the .sarif output is uploaded — the upload path is
+      # deliberately narrow so no unexpected files (env dumps, tmp data)
+      # can accidentally be published as build artifacts.
+      - name: Upload QScanner SARIF as workflow artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qscanner-report-${{ github.sha }}
-          path: |
-            qscanner-report*
+          path: qscanner-report.sarif
+          if-no-files-found: warn
           retention-days: 30
 
       # Publish SARIF results to GitHub's Security tab.
